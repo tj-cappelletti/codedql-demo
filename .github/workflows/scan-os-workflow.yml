@@ -87,7 +87,7 @@ jobs:
       uses: github/codeql-action/analyze@v1
       with:
         upload: false
-        output: .
+        output: ${{ runner.temp }}/codeql
 
     # find the application path in /opt/hostedtoolcache/CodeQL directory
     - name: Find CodeQL
@@ -117,13 +117,16 @@ jobs:
     #         title: 'CodeQL Analysis Results',
     #         body: body
     #       })
+    
+    - shell: bash
+      run: ls -l ${{ runner.temp }}/codeql
 
     # output scan results as artifact
     - name: CodeQL Scan as artifact
       uses: actions/upload-artifact@v2
       with:
         name: ${{ matrix.language }}-sarif
-        path: ${{ matrix.language }}-sarif
+        path: ${{ runner.temp }}/codeql/${{ matrix.language }}.sarif
 
     # output csv results as artifact
     - name: CodeQL Scan as artifact
