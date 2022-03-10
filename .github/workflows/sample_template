@@ -1,0 +1,133 @@
+name: "Code Analysis"
+
+on:
+  workflow_dispatch: #for testing
+  workflow_call: #for composition
+
+jobs:
+  detect-lang:
+    runs-on: ubuntu-latest
+    outputs:
+      linguist_languages: ${{ steps.linguist_languages.outputs.languages }}
+      codeql_languages: ${{ steps.codeql_languages.outputs.languages }}
+    steps:
+    - id: linguist_languages
+      run: echo "::set-output name=languages::$(gh api repos/${GITHUB_REPOSITORY}/languages)"
+    - id: codeql_languages
+      # builds the list of languages which are both present in the repo and supported by CodeQL
+      # remove from the dictionary the languages that should not be considered
+      run: |
+        echo "::set-output name=languages::$(gh api repos/${GITHUB_REPOSITORY}/languages -q '[
+        {"C":"cpp", "C++":"cpp", "C#":"csharp", "Go":"go", "Java":"java", "JavaScript":"javascript", 
+        "TypeScript":"javascript", "Python":"python", "Ruby":"ruby"}[keys[]]] | unique | . -[null]' )"
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
+  codeql-analysis:
+    needs: [detect-lang]
+    # skip the analysis when the list of languages is empty
+    if: needs.detect-lang.outputs.codeql_languages != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ${{ fromJSON(needs.detect-lang.outputs.codeql_languages) }}
+        exclude:
+          # eventually exclude languages
+          - language: ruby
+        
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+      with:
+        fetch-depth: 0
+
+    # Initializes the CodeQL tools for scanning.
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v1
+      with:
+        languages: ${{ matrix.language }}
+    
+    # Autobuild attempts to build any compiled languages  (C/C++, C#, or Java).
+    # If this step fails, then you should remove it and run the build manually (see below)
+    - name: Autobuild
+      uses: github/codeql-action/autobuild@v1
+
+    # perform the analysis
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v1
+    
+  tsqllint-analysis:
+    name: Codacy Security Scan
+    needs: [detect-lang]
+    if: contains(needs.detect-lang.outputs.linguist_languages, '"TSQL"')
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout the repository to the GitHub Actions runner
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      # Execute Codacy Analysis CLI and generate a SARIF output with the security issues identified during the analysis
+      - name: Run Codacy Analysis CLI
+        uses: codacy/codacy-analysis-cli-action@1.1.0
+        with:
+          tool: tsqllint
+          verbose: true
+          output: ${{ runner.temp }}/results.sarif
+          format: sarif
+          # Adjust severity of non-security issues
+          gh-code-scanning-compat: true
+          # Force 0 exit code to allow SARIF file generation
+          # This will handover control about PR rejection to the GitHub side
+          max-allowed-issues: 2147483647
+
+      - name: Rewrite Codacy SARIF urls to relative paths
+        run: sed -i 's#"uri":"file:///codacy/#"uriBaseId":"%SRCROOT%","uri":"#g' ${{ runner.temp }}/results.sarif
+
+      # Upload the SARIF file generated in the previous step
+      - name: Upload SARIF results file
+        uses: github/codeql-action/upload-sarif@v1
+        with:
+          sarif_file: ${{ runner.temp }}/results.sarif
+
+      - uses: actions/upload-artifact@v2
+        with:
+          name: results.sarif
+          path: ${{ runner.temp }}/results.sarif
+
+  #
+  # Runs Rubocop for Ruby
+  #
+  rubocop-analysis:
+    name: Rubocop Security Scan
+    needs: [detect-lang]
+    if: contains(needs.detect-lang.outputs.linguist_languages, '"Ruby"')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+    # If running on a self-hosted runner, check it meets the requirements
+    # listed at https://github.com/ruby/setup-ruby#using-self-hosted-runners
+    - name: Set up Ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: 2.6
+    - name: Install Code Scanning integration
+      run: gem install 'code-scanning-rubocop'
+    - name: Rubocop run
+      run: |
+        bash -c "
+          rubocop --require code_scanning --format CodeScanning::SarifFormatter -o rubocop.sarif
+          [[ $? -ne 2 ]]
+        "
+    - name: Upload Sarif output
+      uses: github/codeql-action/upload-sarif@v1
+      with:
+        sarif_file: rubocop.sarif
